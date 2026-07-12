@@ -1,0 +1,7 @@
+interface:
+  display_name: "Organize Project Agent Rules"
+  short_description: "Audit and route repository agent rules"
+  default_prompt: "Use $organizing-project-agent-rules to audit and refactor this repository agent rule system without modifying application code."
+
+policy:
+  allow_implicit_invocation: false
