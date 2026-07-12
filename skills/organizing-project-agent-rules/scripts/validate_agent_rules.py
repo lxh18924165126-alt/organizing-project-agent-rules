@@ -18,13 +18,15 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from inventory_agent_rules import (  # noqa: E402
+    EXCLUDED_DIRS,
     extract_markdown_links,
+    markdown_candidate_blocks,
     resolve_markdown_target,
     resolve_root,
 )
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 TARGET_ROOT_BYTES = 4096
 HARD_ROOT_BYTES = 6144
 SOFT_MIN_LINES = 40
@@ -36,11 +38,22 @@ ALLOWED_STATUSES = {
     "conflict",
     "needs-user-input",
     "externalized-runtime-config",
+    "preserved-in-root",
+    "merged-equivalent",
+    "inferred-high-confidence",
+    "user-confirmed",
+    "unresolved-needs-user",
+    "omitted-not-a-rule",
 }
 REQUIRED_LEDGER_COLUMNS = (
     "source id",
     "source",
     "location",
+    "source type",
+    "confidence",
+    "existing explicit rule",
+    "inferred from repository",
+    "user confirmed",
     "semantic summary",
     "category",
     "authority target",
@@ -85,6 +98,11 @@ PLACEHOLDER_LINE_RE = re.compile(
     r"(?i)^(?:\{\{[^}]+\}\}|\$[A-Z][A-Z0-9_]*|"
     r"\[?(?:TODO|TBD|PLACEHOLDER)\]?|<[A-Z][A-Z0-9_ -]*>)\.?$"
 )
+UNRESOLVED_PLACEHOLDER_RE = re.compile(
+    r"\{\{[^}\n]+\}\}|<[A-Z][A-Z0-9_ -]{2,}>|\[(?:TODO|TBD|PLACEHOLDER)\]",
+    re.IGNORECASE,
+)
+UNQUOTED_TEMPLATE_VARIABLE_RE = re.compile(r"\$[A-Z][A-Z0-9_]*")
 AUTOMATIC_WORKFLOW_PATTERNS = (
     re.compile(r"(?i)\balways\b.*\b(agenthub|harness)\b"),
     re.compile(r"(?i)\b(agenthub|harness)\b.*\b(always|automatically|default(?:s)?\s+on)\b"),
@@ -309,6 +327,39 @@ def parse_ledger(path: Path) -> tuple[list[dict[str, str]], list[dict[str, objec
                     line_number,
                 )
             )
+        confidence = entry.get("confidence", "").strip().casefold()
+        if confidence and confidence not in {"high", "medium", "low", "高", "中", "低"}:
+            errors.append(issue(
+                "invalid_rule_confidence", f"Unsupported confidence: {confidence}",
+                str(path), line_number,
+            ))
+        yes_no_fields = ("existing explicit rule", "inferred from repository", "user confirmed")
+        normalized_flags: dict[str, str] = {}
+        for field in yes_no_fields:
+            raw = entry.get(field, "").strip().casefold()
+            normalized_flags[field] = {"yes": "yes", "true": "yes", "是": "yes", "no": "no", "false": "no", "否": "no"}.get(raw, "")
+            if raw and not normalized_flags[field]:
+                errors.append(issue(
+                    "invalid_rule_evidence_flag", f"Unsupported {field} value: {raw}",
+                    str(path), line_number,
+                ))
+        if normalized_flags.get("existing explicit rule") == "yes" and status == "omitted-not-a-rule":
+            errors.append(issue(
+                "explicit_rule_omitted", "An existing explicit rule cannot be silently classified as omitted-not-a-rule.",
+                str(path), line_number,
+            ))
+        if status == "inferred-high-confidence" and not (
+            normalized_flags.get("inferred from repository") == "yes" and confidence in {"high", "高"}
+        ):
+            errors.append(issue(
+                "invalid_inferred_rule_status", "inferred-high-confidence requires repository inference and high confidence.",
+                str(path), line_number,
+            ))
+        if status == "user-confirmed" and normalized_flags.get("user confirmed") != "yes":
+            errors.append(issue(
+                "invalid_user_confirmed_status", "user-confirmed requires User confirmed = yes.",
+                str(path), line_number,
+            ))
         semantic_value = entry.get("semantics changed", "").strip().casefold()
         semantic_aliases = {
             "yes": "yes",
@@ -341,7 +392,7 @@ def parse_ledger(path: Path) -> tuple[list[dict[str, str]], list[dict[str, objec
                     line_number,
                 )
             )
-        elif normalized_semantic == "unknown" and status not in {"conflict", "needs-user-input"}:
+        elif normalized_semantic == "unknown" and status not in {"conflict", "needs-user-input", "unresolved-needs-user"}:
             errors.append(
                 issue(
                     "semantic_change_status_mismatch",
@@ -382,6 +433,18 @@ def load_baseline(path: Path) -> tuple[set[str], list[dict[str, object]]]:
         for item in candidates
         if isinstance(item, dict) and str(item.get("id", "")).strip()
     }
+    evidence_candidates = data.get("evidence_candidates", []) if isinstance(data, dict) else []
+    if evidence_candidates is not None and not isinstance(evidence_candidates, list):
+        return set(), [issue(
+            "invalid_baseline_inventory",
+            "Baseline inventory evidence_candidates must be a list when present.",
+            str(path),
+        )]
+    ids.update(
+        str(item.get("id", "")).strip()
+        for item in evidence_candidates
+        if isinstance(item, dict) and str(item.get("id", "")).strip()
+    )
     return ids, []
 
 
@@ -447,6 +510,8 @@ def validate_ledger_authorities(
         }
         if raw_anchor:
             target_anchors.add(normalize_heading(raw_anchor))
+        if status in {"omitted-not-a-rule", "unresolved-needs-user", "needs-user-input", "conflict"} and target_without_anchor in {"", "-", "n/a", "N/A"}:
+            continue
         if not target_without_anchor:
             errors.append(
                 issue(
@@ -744,6 +809,64 @@ def validate_agenthub_leaf(
             "agenthub_permission_governance_missing",
             "AgentHub rules require read-only investigation roles, owned workspace-write, and separate explicit authorization for danger-full-access.", rel,
         ))
+
+
+def scan_duplicate_and_conflicting_rules(
+    documents: list[tuple[str, str]], errors: list[dict[str, object]]
+) -> None:
+    seen: dict[str, tuple[str, int]] = {}
+    positive: dict[str, tuple[str, int]] = {}
+    negative: dict[str, tuple[str, int]] = {}
+    for rel, text in documents:
+        for line_number, candidate in markdown_candidate_blocks(text):
+            stripped = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", candidate).strip()
+            if not stripped or "](" in stripped:
+                continue
+            normalized = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", " ", stripped.casefold()).strip()
+            if len(normalized) < 8:
+                continue
+            if normalized in seen:
+                first_rel, first_line = seen[normalized]
+                errors.append(issue(
+                    "duplicate_active_rule",
+                    f"Duplicate active rule also appears at {first_rel}:{first_line}.", rel, line_number,
+                ))
+            else:
+                seen[normalized] = (rel, line_number)
+            is_negative = bool(re.search(r"(?i)\b(?:must|should|shall|do)\s+not\b|\bnever\b|不得|禁止|不要", stripped))
+            subject = re.sub(r"(?i)\b(?:must|should|shall|do)\s+not\b|\b(?:must|should|shall)\b|\bnever\b|必须|应当|不得|禁止|不要", " ", stripped)
+            subject = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", " ", subject.casefold()).strip()
+            bucket = negative if is_negative else positive
+            other = positive if is_negative else negative
+            if subject and subject in other:
+                other_rel, other_line = other[subject]
+                errors.append(issue(
+                    "conflicting_active_rule",
+                    f"Obvious opposite rule also appears at {other_rel}:{other_line}.", rel, line_number,
+                ))
+            bucket.setdefault(subject, (rel, line_number))
+
+
+def scan_unresolved_placeholders(
+    documents: list[tuple[str, str]], errors: list[dict[str, object]]
+) -> None:
+    for rel, text in documents:
+        in_fence = False
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            stripped = line.strip()
+            if stripped.startswith(("```", "~~~")):
+                in_fence = not in_fence
+                continue
+            without_inline_code = re.sub(r"`[^`]*`", "", line)
+            if not in_fence and (
+                UNRESOLVED_PLACEHOLDER_RE.search(line)
+                or UNQUOTED_TEMPLATE_VARIABLE_RE.search(without_inline_code)
+            ):
+                errors.append(issue(
+                    "unresolved_placeholder",
+                    "Active rule text contains an unresolved template placeholder.",
+                    rel, line_number,
+                ))
 def validate_repository(
     start: Path | str = Path.cwd(),
     ledger_path: Path | str | None = None,
@@ -963,9 +1086,51 @@ def validate_repository(
                     )
                 )
 
+    active_paths = {root_path.resolve()} if root_path.is_file() else set()
+    active_paths.update(path.resolve() for path in routed_paths)
+    for nested_path in sorted(root.rglob("*")):
+        if not nested_path.is_file() or nested_path.is_symlink():
+            continue
+        if nested_path.name not in {"AGENTS.md", "AGENTS.override.md"}:
+            continue
+        if nested_path.resolve() in active_paths:
+            continue
+        nested_parts = set(nested_path.relative_to(root).parts)
+        if nested_parts.intersection(EXCLUDED_DIRS):
+            continue
+        nested_rel = nested_path.relative_to(root).as_posix()
+        nested_text = nested_path.read_text(encoding="utf-8", errors="replace")
+        documents.append((nested_rel, nested_text))
+        for link in extract_markdown_links(nested_text):
+            resolved = resolve_markdown_target(root, nested_path, str(link["raw_target"]))
+            if resolved is not None and not resolved[1]:
+                errors.append(issue(
+                    "dangling_markdown_link",
+                    f"Missing Markdown target: {resolved[0]}",
+                    nested_rel, int(link["line"]),
+                ))
+
+    scan_unresolved_placeholders(documents, errors)
+    scan_duplicate_and_conflicting_rules(documents, errors)
     scan_forbidden_workflows(documents, errors)
 
     baseline = resolve_optional_path(root, baseline_inventory_path)
+    if baseline is not None and baseline.is_file():
+        try:
+            baseline_document = json.loads(baseline.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            baseline_document = {}
+        if isinstance(baseline_document, dict) and baseline_document.get("mode") == "bootstrap":
+            signals = baseline_document.get("domain_signals", {})
+            if isinstance(signals, dict):
+                for route_path in routed_paths:
+                    domain = route_path.stem.casefold()
+                    if domain in {"frontend", "backend", "contracts", "database", "security", "infrastructure"} and not bool(signals.get(domain)):
+                        errors.append(issue(
+                            "unsupported_bootstrap_domain_route",
+                            f"Bootstrap route {domain} has no supporting repository domain signal.",
+                            route_path.relative_to(root).as_posix(),
+                        ))
     ledger_entries: list[dict[str, str]] = []
     if ledger is not None:
         if not ledger.is_file():

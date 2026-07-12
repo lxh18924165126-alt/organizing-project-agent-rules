@@ -17,7 +17,7 @@ from typing import Iterable
 from urllib.parse import unquote, urlsplit
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 EXCLUDED_DIRS = {
     ".git",
     ".hg",
@@ -67,6 +67,12 @@ RUNTIME_CONFIG_PATTERNS = (
     ("fixed-context-threshold", re.compile(r"\b(?:272000|240000|258400)\b")),
     ("pricing-threshold", re.compile(r"(?:price|pricing|价格|倍率|multiplier).{0,30}\b\d+(?:\.\d+)?x\b", re.IGNORECASE)),
 )
+ASSISTANT_EVIDENCE_NAMES = {
+    "claude.md",
+    "gemini.md",
+    "copilot-instructions.md",
+    ".github/copilot-instructions.md",
+}
 
 
 def run_git(path: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -586,17 +592,178 @@ def is_candidate_source(rel: str) -> bool:
         return True
     if "test" in parts or "tests" in parts:
         return True
+    if parts.intersection({"contracts", "schemas", "database", "migrations", "prisma", "infra", "infrastructure"}):
+        return True
+    if name in {"schema.json", "schema.sql", "schema.prisma", "openapi.json", "openapi.yaml", "openapi.yml"}:
+        return True
     return False
 
 
-def collect_inventory(start: Path | str = Path.cwd()) -> dict[str, object]:
+def discover_noncanonical_instruction_evidence(
+    root: Path, files: Iterable[Path]
+) -> tuple[list[str], list[str]]:
+    anomalous: list[str] = []
+    assistant_evidence: list[str] = []
+    for path in files:
+        rel = relative_path(root, path)
+        name = path.name.casefold()
+        if name in {"agents.md", "agents.override.md", "agent.md"} and path.name not in INSTRUCTION_NAMES:
+            anomalous.append(rel)
+        if name in ASSISTANT_EVIDENCE_NAMES or rel.casefold() in ASSISTANT_EVIDENCE_NAMES:
+            assistant_evidence.append(rel)
+    return sorted(set(anomalous)), sorted(set(assistant_evidence))
+
+
+def detect_domain_signals(root: Path, files: Iterable[Path]) -> dict[str, bool]:
+    signals = {name: False for name in (
+        "frontend", "backend", "contracts", "database", "security", "infrastructure"
+    )}
+    for path in files:
+        rel = relative_path(root, path).casefold()
+        parts = set(Path(rel).parts)
+        if rel.startswith("docs/agent/"):
+            continue
+        name = path.name.casefold()
+        if parts.intersection({"frontend", "web", "ui"}) or "apps/web" in rel:
+            signals["frontend"] = True
+        if parts.intersection({"backend", "server", "api", "services"}) or name in {"main.py", "main.go", "program.cs"}:
+            signals["backend"] = True
+        if parts.intersection({"contracts", "schemas"}) or any(token in rel for token in ("openapi", "shared/types", "schema.json")):
+            signals["contracts"] = True
+        if parts.intersection({"database", "migrations", "prisma"}) or name in {"schema.sql", "schema.prisma"}:
+            signals["database"] = True
+        if parts.intersection({"auth", "security", "identity"}):
+            signals["security"] = True
+        if parts.intersection({"infra", "infrastructure", "terraform"}) or any(
+            token in rel for token in (".github/workflows/", ".gitlab-ci", ".circleci/", "dockerfile", "docker-compose")
+        ):
+            signals["infrastructure"] = True
+        if name == "package.json":
+            try:
+                package_text = path.read_text(encoding="utf-8", errors="replace").casefold()
+            except OSError:
+                package_text = ""
+            if any(token in package_text for token in ('"react"', '"vue"', '"svelte"', '"next"')):
+                signals["frontend"] = True
+    return signals
+
+
+def select_mode(
+    root: Path,
+    graph: list[dict[str, object]],
+    *,
+    has_rule_issues: bool = False,
+    requested_mode: str | None = None,
+) -> tuple[str, bool, list[str]]:
+    root_path = root / "AGENTS.md"
+    reasons: list[str] = []
+    if not root_path.is_file():
+        automatic = "bootstrap"
+        reasons.append("root AGENTS.md is missing")
+    else:
+        text = root_path.read_text(encoding="utf-8", errors="replace")
+        routing_present = bool(rule_routing_line_ranges(text))
+        normalized_headings = {
+            re.sub(r"[^a-z0-9\u4e00-\u9fff]+", " ", line.lstrip("# ").casefold()).strip()
+            for line in text.splitlines() if re.match(r"^\s{0,3}#{1,6}\s+", line)
+        }
+        required_heading_groups = (
+            ("basic conventions", "基本约定"), ("project context", "项目背景"),
+            ("risk and change scale", "风险与改动规模"), ("technology and documentation", "技术栈与文档"),
+            ("rule routing", "规则路由"), ("documentation and checkpoints", "文档与检查点"),
+            ("minimum verification", "最低验证"), ("prohibitions", "禁止事项"),
+            ("architecture guardrails", "架构护栏"),
+            ("optional workflows and rule precedence", "可选工作流入口与规则优先级"),
+        )
+        root_structure_complete = all(
+            any(
+                alias == heading or alias in heading
+                for alias in aliases for heading in normalized_headings
+            )
+            for aliases in required_heading_groups
+        )
+        root_edges = [edge for edge in graph if edge.get("source") == "AGENTS.md"]
+        broken_route = any(not bool(edge.get("exists")) for edge in root_edges)
+        partial_rule_tree = (root / "docs" / "agent").exists()
+        root_over_hard_limit = root_path.stat().st_size > 6144
+        if routing_present and (
+            broken_route or root_over_hard_limit or has_rule_issues
+            or not root_structure_complete or (partial_rule_tree and not root_edges)
+        ):
+            automatic = "repair"
+            reasons.append("existing routing structure is incomplete, duplicated, over budget, or has missing targets")
+        elif not routing_present:
+            automatic = "migrate"
+            reasons.append("root AGENTS.md exists without a normalized routing section")
+        else:
+            automatic = "audit"
+            reasons.append("root routing exists and its direct targets are present")
+    if requested_mode is None:
+        return automatic, True, reasons
+    applicable = requested_mode == automatic
+    if not applicable:
+        reasons.append(f"requested mode {requested_mode} is not applicable; automatic mode is {automatic}")
+    return requested_mode, applicable, reasons
+
+
+def build_evidence_candidates(candidate_sources: Iterable[str]) -> list[dict[str, object]]:
+    candidates: list[dict[str, object]] = []
+    for rel in sorted(set(candidate_sources)):
+        lower = rel.casefold()
+        name = Path(rel).name.casefold()
+        if name.startswith(("readme", "contributing")) or "adr" in Path(lower).parts:
+            source_type = "documentation"
+            confidence = "medium"
+        elif any(token in lower for token in (".github/workflows/", ".gitlab-ci", ".circleci/")):
+            source_type = "machine-config"
+            confidence = "high"
+        elif name.endswith((".lock", "lock.yaml", "lock.json")) or name in {
+            "package.json", "pyproject.toml", "cargo.toml", "go.mod", "pom.xml",
+            "build.gradle", "build.gradle.kts", "tsconfig.json", "dockerfile",
+            "schema.json", "schema.sql", "schema.prisma", "openapi.json", "openapi.yaml", "openapi.yml",
+        }:
+            source_type = "machine-config"
+            confidence = "high"
+        else:
+            source_type = "repository-evidence"
+            confidence = "low"
+        digest = hashlib.sha256(f"{rel}:{source_type}".encode("utf-8")).hexdigest()[:12]
+        candidates.append({
+            "id": f"E-{digest}",
+            "source": rel,
+            "location": "file",
+            "source_type": source_type,
+            "confidence": confidence,
+            "existing_explicit_rule": False,
+            "inferred_from_repository": True,
+            "user_confirmed": False,
+            "summary": f"Candidate repository evidence from {rel}; inspect before deriving any rule.",
+        })
+    return candidates
+
+
+def collect_inventory(
+    start: Path | str = Path.cwd(), requested_mode: str | None = None
+) -> dict[str, object]:
     root, is_git = resolve_root(Path(start))
     warnings: list[str] = []
     files = list(iter_repo_files(root))
     fallback_names = parse_fallback_names(root, warnings)
     instructions = discover_instruction_files(root, files, fallback_names, warnings)
     graph, referenced, content_paths = discover_rule_graph(root, instructions, warnings)
+    anomalous_instructions, assistant_evidence = discover_noncanonical_instruction_evidence(
+        root, files
+    )
+    domain_signals = detect_domain_signals(root, files)
     rule_candidates = extract_rule_candidates(root, content_paths, warnings)
+    normalized_candidate_texts = [
+        re.sub(r"[^a-z0-9\u4e00-\u9fff]+", " ", str(item["text"]).casefold()).strip()
+        for item in rule_candidates
+    ]
+    has_rule_issues = len(normalized_candidate_texts) != len(set(normalized_candidate_texts))
+    mode, mode_applicable, mode_reasons = select_mode(
+        root, graph, has_rule_issues=has_rule_issues, requested_mode=requested_mode
+    )
     suspected_runtime_config = detect_suspected_runtime_config(
         root, content_paths, warnings
     )
@@ -611,6 +778,7 @@ def collect_inventory(start: Path | str = Path.cwd()) -> dict[str, object]:
         and relative_path(root, path) not in referenced_rule_paths
         and is_candidate_source(relative_path(root, path))
     )
+    evidence_candidates = build_evidence_candidates(candidate_sources)
     git_status: list[str] = []
     if is_git:
         status = run_git(root, "status", "--short", "--untracked-files=all")
@@ -621,15 +789,23 @@ def collect_inventory(start: Path | str = Path.cwd()) -> dict[str, object]:
     return {
         "schema_version": SCHEMA_VERSION,
         "root": str(root),
+        "root_agents_exists": (root / "AGENTS.md").is_file(),
+        "mode": mode,
+        "mode_applicable": mode_applicable,
+        "mode_reasons": mode_reasons,
         "version_controlled": is_git,
         "git_status": git_status,
         "instruction_files": instructions,
+        "anomalous_instruction_files": anomalous_instructions,
+        "assistant_evidence_files": assistant_evidence,
+        "domain_signals": domain_signals,
         "configured_fallback_names": sorted(fallback_names),
         "referenced_documents": referenced,
         "link_graph": graph,
         "rule_candidates": rule_candidates,
         "suspected_runtime_config": suspected_runtime_config,
         "candidate_sources": candidate_sources,
+        "evidence_candidates": evidence_candidates,
         "warnings": sorted(set(warnings)),
     }
 
@@ -642,12 +818,14 @@ def render_text(report: dict[str, object]) -> str:
     warnings = report["warnings"]
     lines = [
         f"Root: {report['root']}",
+        f"Mode: {report['mode']} ({'applicable' if report['mode_applicable'] else 'not applicable'})",
         f"Version controlled: {'yes' if report['version_controlled'] else 'no'}",
         f"Instruction files: {len(instruction_files)}",
         f"Referenced Markdown documents: {len(report['referenced_documents'])}",
         f"Rule candidates: {len(rule_candidates)}",
         f"Suspected runtime config rules: {len(report['suspected_runtime_config'])}",
         f"Candidate evidence sources: {len(candidate_sources)}",
+        f"Evidence candidates: {len(report['evidence_candidates'])}",
         f"Link edges: {len(link_graph)}",
         f"Warnings: {len(warnings)}",
     ]
@@ -666,12 +844,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--repo", type=Path, default=Path.cwd(), help="Repository or directory to scan")
     parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+    parser.add_argument(
+        "--mode", choices=("bootstrap", "migrate", "repair", "audit"),
+        help="Optional user-requested mode; applicability is reported, not assumed",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    report = collect_inventory(args.repo)
+    report = collect_inventory(args.repo, requested_mode=args.mode)
     if args.json:
         json.dump(report, sys.stdout, ensure_ascii=False, indent=2, sort_keys=True)
         sys.stdout.write("\n")

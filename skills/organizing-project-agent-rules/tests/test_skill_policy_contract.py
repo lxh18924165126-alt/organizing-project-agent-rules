@@ -42,6 +42,32 @@ class SkillPolicyContractTests(unittest.TestCase):
         self.assertIn("Advisor", routed)
         self.assertIn("平台允许", routed)
 
+    def test_single_skill_supports_four_modes_and_bootstrap_evidence_policy(self) -> None:
+        skill = self.read("SKILL.md")
+        description = skill.split("---", 2)[1]
+        for marker in ("missing", "scattered", "duplicate", "conflict", "oversized", "create", "migrate", "normalize"):
+            self.assertIn(marker, description.lower())
+        workflow_files = {
+            "bootstrap": "bootstrap-workflow.md",
+            "migrate": "migration-workflow.md",
+            "repair": "repair-workflow.md",
+            "audit": "audit-workflow.md",
+        }
+        for mode, filename in workflow_files.items():
+            self.assertIn(mode, skill)
+            self.assertTrue((SKILL_DIR / "references" / filename).is_file())
+        self.assertIn("集中提问", self.read("references/bootstrap-workflow.md"))
+        self.assertIn("单一代码模式", self.read("references/bootstrap-workflow.md"))
+        self.assertIn("no-op", self.read("references/repair-workflow.md"))
+        self.assertNotIn("allow_implicit_invocation: true", self.read("agents/openai.yaml"))
+
+    def test_eval_scenarios_cover_bootstrap_repair_audit_and_idempotency(self) -> None:
+        scenarios = self.read("references/eval-scenarios.md")
+        for number in range(20, 34):
+            self.assertIn(f"### 场景 {number}", scenarios)
+        for marker in ("bootstrap", "migrate", "repair", "audit", "集中询问", "幂等"):
+            self.assertIn(marker, scenarios)
+
 
 if __name__ == "__main__":
     unittest.main()

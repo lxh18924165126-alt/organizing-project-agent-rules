@@ -185,7 +185,7 @@ class InventoryAgentRulesTests(unittest.TestCase):
             self.assertEqual(repeated.returncode, 0, repeated.stderr)
             self.assertEqual(completed.stdout, repeated.stdout)
             report = json.loads(completed.stdout)
-            self.assertEqual(report["schema_version"], 1)
+            self.assertEqual(report["schema_version"], 2)
             self.assertEqual(Path(report["root"]), root.resolve())
             self.assertIn("instruction_files", report)
             self.assertIn("rule_candidates", report)

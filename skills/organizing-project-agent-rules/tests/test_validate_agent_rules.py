@@ -75,11 +75,18 @@ def root_document(
 
 def ledger(rows: list[str]) -> str:
     header = (
-        "| Source ID | Source | Location | Semantic summary | Category | "
+        "| Source ID | Source | Location | Source type | Confidence | Existing explicit rule | "
+        "Inferred from repository | User confirmed | Semantic summary | Category | "
         "Authority target | Status | Evidence | Semantics changed | Conflict / notes |\n"
-        "|---|---|---|---|---|---|---|---|---|---|\n"
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n"
     )
-    return "# Rule migration ledger\n\n" + header + "\n".join(rows) + "\n"
+    expanded: list[str] = []
+    for row in rows:
+        cells = [cell.strip() for cell in row.strip().strip("|").split("|")]
+        if len(cells) == 10:
+            cells = cells[:3] + ["explicit-rule", "high", "yes", "no", "no"] + cells[3:]
+        expanded.append("| " + " | ".join(cells) + " |")
+    return "# Rule evidence ledger\n\n" + header + "\n".join(expanded) + "\n"
 
 
 class ValidateAgentRulesTests(unittest.TestCase):
@@ -291,7 +298,7 @@ class ValidateAgentRulesTests(unittest.TestCase):
                 encoding="utf-8",
             )
             (custom / "backend.md").write_text(
-                "# Backend\n\n## Applies to\nAPI.\n\n## Does not apply to\nUI.\n\n"
+                "# Backend\n\n## Applies to\nAPI behavior.\n\n## Does not apply to\nUI-only work.\n\n"
                 "## Authoritative rules\n- Read [deep](deep.md) before editing.\n",
                 encoding="utf-8",
             )
@@ -688,6 +695,147 @@ class ValidateAgentRulesTests(unittest.TestCase):
                 "overbroad_file_deletion_ban",
                 {item["code"] for item in report["errors"]},
             )
+
+    def test_rejects_duplicate_and_obviously_conflicting_active_rules(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ledger_path, baseline_path = self.make_valid_repo(root)
+            route = root / "docs" / "agent" / "domains" / "backend.md"
+            route.write_text(
+                "# Backend\n\n## Applies to\nAPI.\n\n## Does not apply to\nUI.\n\n"
+                "## Authoritative rules\n- Keep handlers thin.\n- Keep handlers thin.\n"
+                "- Must commit generated files.\n- Must not commit generated files.\n",
+                encoding="utf-8",
+            )
+            report = module.validate_repository(root, ledger_path, baseline_path)
+            codes = {item["code"] for item in report["errors"]}
+            self.assertIn("duplicate_active_rule", codes)
+            self.assertIn("conflicting_active_rule", codes)
+
+    def test_bootstrap_routes_only_domains_supported_by_inventory(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ledger_path, _ = self.make_valid_repo(root)
+            frontend = root / "docs" / "agent" / "domains" / "frontend.md"
+            frontend.write_text(
+                "# Frontend\n\n## Applies to\nUI behavior.\n\n## Does not apply to\nAPI-only work.\n\n"
+                "## Authoritative rules\n- Run UI tests.\n", encoding="utf-8"
+            )
+            (root / "AGENTS.md").write_text(
+                root_document(route_target="docs/agent/domains/frontend.md"), encoding="utf-8"
+            )
+            baseline = root / "bootstrap-inventory.json"
+            baseline.write_text(json.dumps({
+                "schema_version": 2,
+                "mode": "bootstrap",
+                "domain_signals": {"frontend": False, "backend": True, "contracts": False, "database": False, "security": False, "infrastructure": False},
+                "rule_candidates": [],
+            }), encoding="utf-8")
+            report = module.validate_repository(root, ledger_path, baseline)
+            self.assertIn(
+                "unsupported_bootstrap_domain_route",
+                {item["code"] for item in report["errors"]},
+            )
+
+    def test_extended_ledger_requires_evidence_classification_and_valid_handling(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ledger_path, baseline_path = self.make_valid_repo(root)
+            ledger_path.write_text(
+                "# Legacy ledger\n\n"
+                "| Source ID | Source | Location | Semantic summary | Category | Authority target | Status | Evidence | Semantics changed | Conflict / notes |\n"
+                "|---|---|---|---|---|---|---|---|---|---|\n"
+                "| R-one | AGENTS.md | L10 | Keep handlers thin | backend | AGENTS.md | kept | rule | no | - |\n",
+                encoding="utf-8",
+            )
+            report = module.validate_repository(root, ledger_path, baseline_path)
+            self.assertIn(
+                "invalid_migration_ledger",
+                {item["code"] for item in report["errors"]},
+            )
+
+    def test_bootstrap_evidence_candidates_require_ledger_coverage(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ledger_path, baseline_path = self.make_valid_repo(root)
+            baseline_path.write_text(json.dumps({
+                "schema_version": 2,
+                "rule_candidates": [
+                    {"id": "R-one", "source": "AGENTS.md", "line": 10, "text": "Keep handlers thin"},
+                    {"id": "R-two", "source": "AGENTS.md", "line": 11, "text": "Never log tokens"},
+                ],
+                "evidence_candidates": [
+                    {"id": "E-ci", "source": ".github/workflows/ci.yml", "summary": "CI evidence"}
+                ],
+            }), encoding="utf-8")
+            report = module.validate_repository(root, ledger_path, baseline_path)
+            self.assertIn("E-ci", report["ledger"]["missing_source_ids"])
+
+    def test_nested_instruction_rules_participate_in_links_duplicates_and_conflicts(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ledger_path, baseline_path = self.make_valid_repo(root)
+            nested = root / "services" / "api" / "AGENTS.override.md"
+            nested.parent.mkdir(parents=True)
+            nested.write_text(
+                "# API override\n\n- Keep handlers thin.\n"
+                "- Do not keep handlers thin.\n"
+                "- Read [missing rules](missing.md).\n",
+                encoding="utf-8",
+            )
+            report = module.validate_repository(root, ledger_path, baseline_path)
+            codes = {item["code"] for item in report["errors"]}
+            self.assertIn("duplicate_active_rule", codes)
+            self.assertIn("conflicting_active_rule", codes)
+            self.assertIn("dangling_markdown_link", codes)
+
+    def test_rejects_embedded_unresolved_placeholders_in_active_rules(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ledger_path, baseline_path = self.make_valid_repo(root)
+            route = root / "docs" / "agent" / "domains" / "backend.md"
+            route.write_text(
+                route.read_text(encoding="utf-8") + "\n- Run {{FOCUSED_TEST_COMMAND}} before completion.\n",
+                encoding="utf-8",
+            )
+            report = module.validate_repository(root, ledger_path, baseline_path)
+            self.assertIn(
+                "unresolved_placeholder",
+                {item["code"] for item in report["errors"]},
+            )
+
+    def test_allows_quoted_shell_environment_variables(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ledger_path, baseline_path = self.make_valid_repo(root)
+            route = root / "docs" / "agent" / "domains" / "backend.md"
+            route.write_text(
+                route.read_text(encoding="utf-8") + "\n- Use `$DATABASE_URL` for local migrations.\n",
+                encoding="utf-8",
+            )
+            report = module.validate_repository(root, ledger_path, baseline_path)
+            self.assertNotIn(
+                "unresolved_placeholder",
+                {item["code"] for item in report["errors"]},
+            )
+
+    def test_ignores_nested_instruction_copies_in_excluded_build_directories(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ledger_path, baseline_path = self.make_valid_repo(root)
+            generated = root / "build" / "AGENTS.md"
+            generated.parent.mkdir()
+            generated.write_text("# Generated copy\n\n- Keep handlers thin.\n", encoding="utf-8")
+            report = module.validate_repository(root, ledger_path, baseline_path)
+            self.assertTrue(report["valid"], report["errors"])
 
 
 if __name__ == "__main__":

@@ -1,13 +1,13 @@
 ---
 name: organizing-project-agent-rules
-description: Use when a repository's AGENTS.md is oversized, mixes project-wide and domain-specific instructions, lacks rule routing, or must be standardized without losing existing project rules.
+description: Use when a repository is missing a root AGENTS.md, has scattered, duplicate, conflicting, oversized, or incomplete Agent rules, or needs to create, migrate, repair, audit, or normalize project Agent rule routing.
 ---
 
 # Organizing Project Agent Rules
 
 ## Outcome
 
-将仓库规则系统整理为“项目基本属性 + 最小执行内核 + 直接规则路由器”。保留或完整迁移每条有效旧规则，降低默认上下文成本，并让根级、嵌套、override、fallback 和按需规则各有唯一权威位置。
+建立、迁移、规范化和验证项目的 Agent 规则系统。统一产出“项目基本属性 + 最小执行内核 + 直接规则路由器”，并让根级、嵌套、override、fallback 和按需规则各有唯一权威位置。
 
 只修改项目指令与规则文档。除非用户另有明确要求，不修改业务代码、依赖、构建、CI、部署配置或生产环境；不提交或推送。
 
@@ -17,7 +17,8 @@ description: Use when a repository's AGENTS.md is oversized, mixes project-wide 
 2. 修改根文件前读取 [root-agents-template.md](references/root-agents-template.md)，把它当覆盖与预算参考，不机械套用。
 3. 创建或重写叶子规则前读取 [routed-rule-template.md](references/routed-rule-template.md)。
 4. 建立账本前读取 [migration-ledger-template.md](references/migration-ledger-template.md)。
-5. 仅在评测或维护本 Skill 时读取 [eval-scenarios.md](references/eval-scenarios.md)；正常仓库治理无需加载。
+5. 模式确定后只读取对应内部流程：[bootstrap](references/bootstrap-workflow.md)、[migrate](references/migration-workflow.md)、[repair](references/repair-workflow.md) 或 [audit](references/audit-workflow.md)。四种模式共享前述政策与模板。
+6. 仅在评测或维护本 Skill 时读取 [eval-scenarios.md](references/eval-scenarios.md)；正常仓库治理无需加载。
 
 使用本 Skill 目录中两个纯标准库、只读脚本：
 
@@ -44,13 +45,18 @@ description: Use when a repository's AGENTS.md is oversized, mixes project-wide 
 
 严格按顺序执行。不得从“压缩根文件”直接开始。
 
-### 1. Determine scope and protect current work
+### 1. Determine scope, inventory, and select mode
 
 1. 把 `SKILL_DIR` 设为当前 Skill 目录。把用户指定目录设为 `TARGET`；未指定时使用当前目录。若 `git -C "$TARGET" rev-parse --show-toplevel` 成功，把其输出设为 `REPO` 并标记 `IS_GIT=1`；否则把 `TARGET` 的物理绝对路径设为 `REPO` 并标记 `IS_GIT=0`。
 2. Git 仓库立即运行 `git -C "$REPO" status --short`，记录已有修改、未跟踪规则文件和允许修改的路径。非 Git 目录在仓库外临时目录保存所有原始指令/规则文件的相对路径内容副本和全仓文件 SHA-256 清单。
 3. 明确本次不修改业务代码、依赖、构建、CI、部署或生产状态。若用户只要求分析，保持全程只读。
 4. 使用可审查的增量修改，不做无依据的全量替换。非 Git 目录使用原子写入；不要在仓库中遗留 `.bak` 或临时快照。
 5. 保留用户未提交修改。不得 reset、checkout、回滚、覆盖或把工作树替换为 HEAD。
+6. 运行盘点器自动选择模式；用户指定模式时传入 `--mode`，检查 `mode_applicable`，不适用时说明证据后改用自动模式或集中请求用户确认：
+   - `bootstrap`：根 `AGENTS.md` 缺失；这是合法输入，不是盘点失败。
+   - `migrate`：根存在但尚无规范直接路由，需要压缩或迁移。
+   - `repair`：已有部分路由结构，但有悬空引用、结构缺口、冲突、重复或预算问题。
+   - `audit`：直接路由完整；先验证，validator 通过且无语义问题时保持 no-op。
 
 ### 2. Inventory and read all governing sources
 
@@ -72,12 +78,13 @@ python3 "$SKILL_DIR/scripts/inventory_agent_rules.py" --repo "$REPO" --json > "$
 - `.codex/rules/`、lint、架构测试、CI 和生成文件标记中的硬约束；
 - README、CONTRIBUTING、ADR、架构、API 和运维文档；
 - 包清单、锁文件、构建/工作区配置、入口和测试目录。
+- 大小写或命名异常的 Agent 指令，以及其他助手说明文件；后者只作证据，不自动成为 Codex 权威规则。
 
 不要假设嵌套 `AGENTS.md` 从仓库根启动时必然加载。把关键领域规则设计为根可直接路由，或明确保留为适用目录的局部覆盖。
 
 ### 3. Build the migration ledger before editing
 
-按 [migration-ledger-template.md](references/migration-ledger-template.md) 建立工作账本。修改前为每条实际约束规则记录：来源与位置、语义摘要、分类、唯一权威目标、状态、证据、语义是否变化、冲突或问题。
+按 [migration-ledger-template.md](references/migration-ledger-template.md) 建立统一规则证据账本。修改前记录来源类型、置信度、是否为现有明确规则/仓库推断/用户确认、语义摘要、分类、唯一权威目标、状态、证据、语义是否变化及冲突。bootstrap 的候选事实与已有局部规则使用同一账本。
 
 至少分类：
 
@@ -88,21 +95,21 @@ python3 "$SKILL_DIR/scripts/inventory_agent_rules.py" --repo "$REPO" --json > "$
 - 维护者说明、案例、历史背景；
 - 应由 `.codex/rules/`、lint、测试或 CI 强制的机械约束。
 
-只使用 `kept`、`migrated`、`merged-duplicate`、`conflict`、`needs-user-input`、`externalized-runtime-config`。相似措辞不自动等于重复；合并时仍为每个 Source ID 保留覆盖记录。
+优先使用 `preserved-in-root`、`migrated`、`merged-equivalent`、`inferred-high-confidence`、`user-confirmed`、`unresolved-needs-user`、`omitted-not-a-rule`、`externalized-runtime-config`；兼容旧账本状态但新账本不得混用同义状态。相似措辞不自动等于重复；合并时仍为每个 Rule ID 保留覆盖记录。
 
 ### 4. Infer missing project attributes and batch questions
 
-按以下优先级取证：
+按以下优先级取证：用户当前明确信息 > 已有明确规则文档 > CI/lint/构建/schema 等机器强制配置 > 多个相互印证的代码/目录信号 > 单一代码模式。
 
 1. 可执行配置和清单；
 2. 架构测试、lint、CI 和代码边界；
-3. 当前代码与测试的稳定模式；
+3. 当前代码与测试的多个相互印证模式；
 4. README、ADR 和维护文档；
 5. 命名、目录等弱信号。
 
 可推断技术栈、权威版本来源、常用命令、模块边界、生成文件、测试方式和明显依赖。不得仅凭现状臆造业务目标、审批流程、生产政策、未来架构、合规要求或团队制度。
 
-完成初步审计后，把低置信度但会实质影响规则的问题合并成一组再询问。用户暂不回答时，继续能安全确认的部分，把未确认项留在账本和最终报告；不要把猜测、`TODO` 或 `TBD` 写入生效规则。
+单一代码模式不得升级为硬规则。完成初步审计后，只把无法可靠获取、会实质影响根禁止项/架构护栏/路由且不问就只能编造的未知项集中提问一次。用户暂不回答时继续安全部分，把未确认项留在账本和最终报告；不要把猜测、`TODO` 或 `TBD` 写入生效规则，也不重复询问已经回答的问题。
 
 ### 5. Design the target routing structure
 
@@ -183,12 +190,14 @@ python3 "$SKILL_DIR/scripts/validate_agent_rules.py" \
 - 未引入项目计划模式规则，未自动启用 AgentHub、Harness 或全部 Superpower；
 - 用户已有修改和非规则文件保持原样；
 - 未运行的检查未被声称通过。
+- 相同输入再次运行时结构、Rule ID 和路由稳定；不重复创建、迁移、提问、排序或改写。validator 通过且无语义问题时 diff 必须为空。
 
 ## Decision gates
 
 | Condition | Action |
 |---|---|
 | 根文件已合理且低于 4 KiB | 审计并验证；无证据缺陷时报告 no-op，不为套模板改写 |
+| 根 `AGENTS.md` 缺失 | 进入 bootstrap；调查仓库和局部规则后创建根与实际需要的叶子，不把缺失当错误 |
 | 规则疑似重复 | 比较适用条件、强度、例外和权威性；为每个 Source ID 建账 |
 | 仓库证据冲突 | 按证据优先级处理；重要且低置信度的政策冲突记为 `needs-user-input` |
 | 嵌套规则不可从根到达 | 保留局部覆盖并增加根路由，或完整迁移；不要假设自动加载 |
@@ -201,10 +210,12 @@ python3 "$SKILL_DIR/scripts/validate_agent_rules.py" \
 |---|---|
 | “根文件已低于预算，所以迁移完成” | 预算只是一个门；账本覆盖、语义保真、路由和验证必须同时通过 |
 | “旧规则仍在 Git 历史/迁移报告” | 历史不是生效权威；把规则保留或完整迁移到会被正确加载的位置 |
-| “这些规则看起来重复” | 逐条比较强度、条件、例外和验证；用 `merged-duplicate` 映射每个来源 |
+| “这些规则看起来重复” | 逐条比较强度、条件、例外和验证；用 `merged-equivalent` 映射每个来源 |
 | “嵌套 AGENTS.md 会自己加载” | 从根启动行为不可假设；关键领域必须根可路由或明确局部覆盖 |
 | “模板完整，所以先创建所有领域文件” | 只创建实际存在的领域；空文件和无关最佳实践是失败 |
 | “无法确认的事实可以先写 TODO” | 不把猜测写入生效规则；集中询问并在账本/最终报告保留未确认项 |
+| “代码里出现一次，所以这是架构政策” | 单一模式只记低置信度候选；需要多源印证或用户确认才进入硬规则 |
+| “validator 已通过，顺便统一措辞” | audit 应 no-op；无语义缺陷不得制造 diff |
 
 ## Red flags
 
@@ -217,6 +228,7 @@ python3 "$SKILL_DIR/scripts/validate_agent_rules.py" \
 - 根超过 6 KiB、引用不存在、叶子为空或存在强制二级路由；
 - 用户未提交修改被覆盖；
 - 仍有验证错误却声称完成。
+- audit 模式在 validator 通过时仍产生无意义 diff，或第二次运行重复规则、迁移记录或问题。
 
 ## Completion report
 
@@ -224,7 +236,7 @@ python3 "$SKILL_DIR/scripts/validate_agent_rules.py" \
 
 - 根 `AGENTS.md` 的 UTF-8 字节数和行数；
 - 创建、修改、保留和移除的规则文件；
-- `kept`、`migrated`、`merged-duplicate`、`conflict`、`needs-user-input`、`externalized-runtime-config` 数量；
+- 各证据来源类型、置信度与处理状态数量，包括 `externalized-runtime-config`；
 - 从仓库推断的内容及证据、用户明确提供的内容；
 - 冲突、未确认事项和推迟的危险步骤；
 - 实际运行的清单、验证、diff 和项目检查，以及未运行项。
