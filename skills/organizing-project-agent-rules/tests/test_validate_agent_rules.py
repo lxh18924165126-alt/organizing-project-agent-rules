@@ -69,6 +69,10 @@ def root_document(
 ## Optional workflows and rule precedence
 - Optional workflows require an explicit user request.
 - Platform constraints outrank current user scope, root rules, routed rules, and convention.
+
+## Superpower
+- Superpower is denied by default. Only an actual R3 repository modification or an explicit user request for an engineering design, engineering implementation, or Harness workflow may allow considering the narrowest specific skill.
+- Meeting a gate only lifts the prohibition; it does not require using any skill. The `using-superpowers` entry point is always forbidden.
 {extra}
 """
 
@@ -262,6 +266,121 @@ class ValidateAgentRulesTests(unittest.TestCase):
 
             self.assertIn("automatic_optional_workflow", codes)
 
+    def test_requires_complete_superpower_default_deny_contract(self) -> None:
+        module = load_module()
+        cases = {
+            "missing_default_deny": "- Superpower may be used for an actual R3 repository modification or an explicit engineering workflow.\n- Allowed does not mean required; never use `using-superpowers`.\n",
+            "missing_r3_gate": "- Superpower is denied by default and may be considered only for an explicit engineering design, engineering implementation, or Harness workflow.\n- Allowed does not mean required; never use `using-superpowers`.\n",
+            "missing_explicit_engineering_gate": "- Superpower is denied by default and may be considered only for an actual R3 repository modification.\n- Allowed does not mean required; never use `using-superpowers`.\n",
+            "missing_optional_semantics": "- Superpower is denied by default. Only an actual R3 repository modification or an explicit user request for an engineering design, engineering implementation, or Harness workflow may allow a specific skill.\n- Never use `using-superpowers`.\n",
+            "missing_entrypoint_ban": "- Superpower is denied by default. Only an actual R3 repository modification or an explicit user request for an engineering design, engineering implementation, or Harness workflow may allow a specific skill.\n- Meeting a gate only lifts the prohibition; it does not require using any skill.\n",
+        }
+        expected_codes = {
+            "missing_default_deny": "superpower_default_deny_missing",
+            "missing_r3_gate": "superpower_r3_gate_missing",
+            "missing_explicit_engineering_gate": "superpower_explicit_engineering_gate_missing",
+            "missing_optional_semantics": "superpower_optional_semantics_missing",
+            "missing_entrypoint_ban": "using_superpowers_entrypoint_ban_missing",
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ledger_path, baseline_path = self.make_valid_repo(root)
+            original = root_document()
+            start = original.index("## Superpower")
+            for name, replacement in cases.items():
+                with self.subTest(name=name):
+                    (root / "AGENTS.md").write_text(
+                        original[:start] + "## Superpower\n" + replacement,
+                        encoding="utf-8",
+                    )
+                    report = module.validate_repository(root, ledger_path, baseline_path)
+                    codes = {item["code"] for item in report["errors"]}
+                    self.assertIn(expected_codes[name], codes, report["errors"])
+
+    def test_rejects_unauthorized_independent_superpower_triggers(self) -> None:
+        module = load_module()
+        violations = (
+            "- R0 work may use Superpower.\n",
+            "- R2 work may use Superpower.\n",
+            "- R2 work may use Superpower, but this does not mean it is required.\n",
+            "- Work spanning many files may use Superpower.\n",
+            "- Cross-domain work may invoke Superpower.\n",
+            "- Difficult debugging may use systematic-debugging.\n",
+            "- Unknown root cause allows systematic-debugging.\n",
+            "- A failed repair may invoke Superpower.\n",
+            "- A user request for TDD allows test-driven-development.\n",
+            "- Plan mode may invoke Superpower.\n",
+            "- Multi-agent work may use Superpower.\n",
+            "- AgentHub may load Superpower.\n",
+            "- Validation failure invokes verification-before-completion.\n",
+            "- A request for full testing may use Superpower.\n",
+            "- A request for code review may invoke Superpower.\n",
+            "- Complex tasks may use Superpower.\n",
+            "- An existing detailed implementation plan may invoke Superpower.\n",
+            "- Naming verification-before-completion may invoke that skill.\n",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ledger_path, baseline_path = self.make_valid_repo(root)
+            (root / "AGENTS.md").write_text(
+                root_document("".join(violations)), encoding="utf-8"
+            )
+            report = module.validate_repository(root, ledger_path, baseline_path)
+            matches = [
+                item for item in report["errors"]
+                if item["code"] == "unauthorized_superpower_trigger"
+            ]
+            self.assertEqual(len(matches), len(violations), report["errors"])
+
+    def test_rejects_superpower_default_allowance_and_harness_skill_chain(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ledger_path, baseline_path = self.make_valid_repo(root)
+            (root / "AGENTS.md").write_text(
+                root_document(
+                    "- Superpower is enabled by default.\n"
+                    "- Harness automatically loads all Superpower skills.\n"
+                ),
+                encoding="utf-8",
+            )
+            report = module.validate_repository(root, ledger_path, baseline_path)
+            codes = {item["code"] for item in report["errors"]}
+            self.assertIn("contradictory_superpower_policy", codes)
+            self.assertIn("automatic_superpower_chain", codes)
+
+    def test_accepts_r3_and_explicit_engineering_as_optional_gates_only(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ledger_path, baseline_path = self.make_valid_repo(root)
+            (root / "AGENTS.md").write_text(
+                root_document(
+                    "- Because the user explicitly requested an engineering workflow, test-driven-development may be considered when it is the narrowest non-duplicative skill.\n"
+                ),
+                encoding="utf-8",
+            )
+            report = module.validate_repository(root, ledger_path, baseline_path)
+            self.assertTrue(report["valid"], report["errors"])
+
+    def test_accepts_concise_chinese_superpower_contract(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ledger_path, baseline_path = self.make_valid_repo(root)
+            original = root_document()
+            start = original.index("## Superpower")
+            chinese_policy = (
+                "## Superpower\n"
+                "Superpower 默认禁止。仅当当前修改被判断为 R3，或用户明确要求工程化设计、工程化实施或 Harness 工作流时，才允许按需调用职责最窄的具体技能。\n\n"
+                "满足条件只解除禁令，不代表必须使用；`using-superpowers` 总入口始终禁止。\n"
+            )
+            (root / "AGENTS.md").write_text(
+                original[:start] + chinese_policy, encoding="utf-8"
+            )
+            report = module.validate_repository(root, ledger_path, baseline_path)
+            self.assertTrue(report["valid"], report["errors"])
+
     def test_rejects_unscoped_workflow_enablement_phrases(self) -> None:
         module = load_module()
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -405,6 +524,37 @@ class ValidateAgentRulesTests(unittest.TestCase):
             self.assertIn("ledger_authority_target_missing", codes)
             self.assertIn("ledger_authority_target_not_runtime", codes)
             self.assertIn("invalid_semantics_changed", codes)
+
+    def test_validates_superseded_current_user_policy_ledger_status(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ledger_path, baseline_path = self.make_valid_repo(root)
+            ledger_path.write_text(
+                ledger(
+                    [
+                        "| R-one | AGENTS.md | L10 | Complex bugs use systematic-debugging | 专项技能 | AGENTS.md#superpower | superseded-by-current-user-policy | original rule plus current policy | yes | conflicts with default-deny; current authority is root Superpower section |",
+                        "| R-two | AGENTS.md | L11 | Never log tokens | security | docs/agent/domains/backend.md | migrated | ADR-1 | no | - |",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            report = module.validate_repository(root, ledger_path, baseline_path)
+            self.assertTrue(report["valid"], report["errors"])
+
+            ledger_path.write_text(
+                ledger(
+                    [
+                        "| R-one | AGENTS.md | L10 | Complex bugs use systematic-debugging | 专项技能 | AGENTS.md#superpower | superseded-by-current-user-policy | original rule | no | - |",
+                        "| R-two | AGENTS.md | L11 | Never log tokens | security | docs/agent/domains/backend.md | migrated | ADR-1 | no | - |",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            report = module.validate_repository(root, ledger_path, baseline_path)
+            codes = {item["code"] for item in report["errors"]}
+            self.assertIn("invalid_superseded_policy_semantics", codes)
+            self.assertIn("superseded_policy_conflict_missing", codes)
 
     def test_hard_limit_cannot_be_relaxed(self) -> None:
         module = load_module()

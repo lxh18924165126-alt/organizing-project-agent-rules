@@ -68,6 +68,33 @@ class SkillPolicyContractTests(unittest.TestCase):
         for marker in ("bootstrap", "migrate", "repair", "audit", "集中询问", "幂等"):
             self.assertIn(marker, scenarios)
 
+    def test_superpower_default_deny_policy_is_authoritative(self) -> None:
+        skill = self.read("SKILL.md")
+        policy = self.read("references/policy-spec.md")
+        root = self.read("references/root-agents-template.md")
+        ledger = self.read("references/migration-ledger-template.md")
+        scenarios = self.read("references/eval-scenarios.md")
+
+        for marker in (
+            "Superpower 默认禁止",
+            "R3",
+            "工程化设计",
+            "工程化实施",
+            "Harness",
+            "只解除禁令",
+            "using-superpowers",
+            "explicit no-superpower > allowed gates > default deny",
+        ):
+            self.assertIn(marker, policy)
+        self.assertIn("Superpower default-deny policy", skill)
+        self.assertIn("superseded-by-current-user-policy", skill)
+        self.assertIn("superseded-by-current-user-policy", ledger)
+        self.assertIn("## Superpower", root)
+        self.assertNotIn("复杂且根因未知的故障可使用 systematic-debugging", root)
+        self.assertNotIn("用户明确要求 TDD 时可使用 test-driven-development", root)
+        for number in range(34, 46):
+            self.assertIn(f"### 场景 {number}", scenarios)
+
 
 if __name__ == "__main__":
     unittest.main()

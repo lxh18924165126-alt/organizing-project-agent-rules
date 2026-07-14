@@ -44,6 +44,7 @@ ALLOWED_STATUSES = {
     "user-confirmed",
     "unresolved-needs-user",
     "omitted-not-a-rule",
+    "superseded-by-current-user-policy",
 }
 REQUIRED_LEDGER_COLUMNS = (
     "source id",
@@ -114,6 +115,44 @@ AUTOMATIC_WORKFLOW_PATTERNS = (
     re.compile(r"(?:R2|R3).*(?:启用|启动|调用).*(?:AgentHub|Harness)", re.IGNORECASE),
     re.compile(r"Harness.*(?:启用|启动|调用).*AgentHub", re.IGNORECASE),
     re.compile(r"(?:全部|所有).*Superpower", re.IGNORECASE),
+)
+SUPERPOWER_REFERENCE_RE = re.compile(
+    r"(?i)\bsuperpowers?\b|\busing-superpowers\b|\bsystematic-debugging\b|"
+    r"\btest-driven-development\b|\bverification-before-completion\b"
+)
+SUPERPOWER_ACTIVATION_RE = re.compile(
+    r"(?i)\b(?:may|can|allow(?:s|ed)?|use(?:s|d)?|invoke(?:s|d)?|load(?:s|ed)?|"
+    r"enable(?:s|d)?|start(?:s|ed)?|run(?:s|ning)?)\b|"
+    r"允许|可以|可使用|可调用|调用|启用|加载|启动|运行"
+)
+SUPERPOWER_NEGATION_RE = re.compile(
+    r"(?i)\b(?:must|should|do|does|may|can|will)\s+not\s+(?:automatically\s+)?"
+    r"(?:use|invoke|load|enable|start|run|allow)\b|"
+    r"\b(?:is|are)\s+not\s+(?:automatically\s+)?(?:enabled|allowed|loaded|used)\b|"
+    r"\bnever\b.{0,80}\b(?:use|invoke|load|enable|start|run|allow)\b|"
+    r"\b(?:denied|disabled|forbidden|prohibited)\b|"
+    r"默认禁止|默认关闭|不得|禁止|不能|不可|不允许|不自动"
+)
+UNAUTHORIZED_SUPERPOWER_TRIGGER_RES = (
+    re.compile(r"(?i)\bR[012]\b"),
+    re.compile(r"(?i)\bmany\s+(?:files?|lines?\s+of\s+code)\b|文件多|代码多|代码行(?:很多|较多)"),
+    re.compile(r"(?i)\bcross[- ]domain\b|跨(?:越)?多个?领域|跨领域"),
+    re.compile(r"(?i)\b(?:difficult|hard|complex)\s+(?:debugging|bug|failure)\b|调试困难|复杂故障|复杂 Bug"),
+    re.compile(r"(?i)\b(?:unknown|unclear)\s+root\s+cause\b|根因(?:未知|不明)"),
+    re.compile(r"(?i)\b(?:failed|unsuccessful)\s+(?:fix|repair)\b|\b(?:fix|repair)\s+fail(?:s|ed|ure)?\b|修复.*失败|尝试.*失败"),
+    re.compile(r"(?i)\bTDD\b|用户.*(?:要求|点名).*TDD"),
+    re.compile(r"(?i)\bplan\s+mode\b|计划模式|规划模式"),
+    re.compile(r"(?i)\bmulti[- ]agent\b|多\s*Agent|多代理"),
+    re.compile(r"(?i)\bagenthub\b"),
+    re.compile(r"(?i)\bvalidation\s+fail(?:s|ed|ure)?\b|验证失败|校验失败"),
+    re.compile(r"(?i)\bfull\s+test(?:ing|s)?\b|完整测试|全量测试"),
+    re.compile(r"(?i)\bcode\s+review\b|代码审查"),
+    re.compile(r"(?i)\bcomplex\s+(?:tasks?|work|changes?)\b|任务复杂|复杂任务"),
+    re.compile(r"(?i)\bdetailed\s+(?:implementation\s+)?plan\b|详细实施计划|已有详细计划"),
+)
+SPECIFIC_SUPERPOWER_SKILL_RE = re.compile(
+    r"(?i)\bsystematic-debugging\b|\btest-driven-development\b|"
+    r"\bverification-before-completion\b"
 )
 ROOT_RUNTIME_CONFIG_PATTERNS = (
     re.compile(r"\bmodel_context_window\b", re.IGNORECASE),
@@ -401,6 +440,25 @@ def parse_ledger(path: Path) -> tuple[list[dict[str, str]], list[dict[str, objec
                     line_number,
                 )
             )
+        if status == "superseded-by-current-user-policy":
+            if normalized_flags.get("existing explicit rule") != "yes":
+                errors.append(issue(
+                    "invalid_superseded_policy_source",
+                    "superseded-by-current-user-policy requires Existing explicit rule = yes.",
+                    str(path), line_number,
+                ))
+            if normalized_semantic != "yes":
+                errors.append(issue(
+                    "invalid_superseded_policy_semantics",
+                    "superseded-by-current-user-policy requires Semantics changed = yes.",
+                    str(path), line_number,
+                ))
+            if entry.get("conflict notes", "").strip() in {"", "-"}:
+                errors.append(issue(
+                    "superseded_policy_conflict_missing",
+                    "Superseded policy rows must record the conflict and current authority.",
+                    str(path), line_number,
+                ))
     ids = [entry.get("source id", "").strip() for entry in entries if entry.get("source id", "").strip()]
     duplicates = sorted({entry_id for entry_id in ids if ids.count(entry_id) > 1})
     if duplicates:
@@ -705,6 +763,115 @@ def scan_forbidden_workflows(
                     seen.add(key)
 
 
+def visible_rule_lines(text: str) -> list[tuple[int, str]]:
+    result: list[tuple[int, str]] = []
+    in_fence = False
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        stripped = line.strip()
+        if stripped.startswith(("```", "~~~")):
+            in_fence = not in_fence
+            continue
+        if not in_fence:
+            result.append((line_number, line))
+    return result
+
+
+def validate_superpower_default_deny(
+    root_text: str,
+    documents: list[tuple[str, str]],
+    errors: list[dict[str, object]],
+) -> None:
+    visible_root = "\n".join(line for _, line in visible_rule_lines(root_text))
+    contract_checks = (
+        (
+            "superpower_default_deny_missing",
+            r"(?is)(?:superpowers?.{0,100}(?:denied|disabled|forbidden|prohibited)\s+by\s+default|"
+            r"(?:denied|disabled|forbidden|prohibited)\s+by\s+default.{0,100}superpowers?|"
+            r"superpower.{0,100}默认(?:禁止|关闭|拒绝)|默认(?:禁止|关闭|拒绝).{0,100}superpower)",
+            "Root rules must state that Superpower is denied by default.",
+        ),
+        (
+            "superpower_r3_gate_missing",
+            r"(?is)\bR3\b.{0,120}(?:repository\s+)?(?:modification|change)|"
+            r"(?:实际|当前|仓库).{0,30}(?:修改|变更).{0,80}\bR3\b|\bR3\b.{0,80}(?:修改|变更)",
+            "Root Superpower policy must retain the actual R3 repository-modification gate.",
+        ),
+        (
+            "superpower_explicit_engineering_gate_missing",
+            r"(?is)(?:explicit(?:ly)?|明确|显式).{0,120}(?:engineering\s+(?:design|implementation|workflow)|"
+            r"工程化(?:设计|实施|工作流)|harness)",
+            "Root Superpower policy must retain the explicit engineering/Harness workflow gate.",
+        ),
+        (
+            "superpower_optional_semantics_missing",
+            r"(?is)(?:only\s+lifts?.{0,100}(?:does\s+not|doesn't)\s+require|"
+            r"allowed.{0,80}(?:does\s+not|doesn't)\s+mean\s+required|"
+            r"只解除禁令.{0,80}不代表必须|满足条件.{0,80}不代表必须)",
+            "Root rules must say that an allowed gate does not require a Superpower skill.",
+        ),
+        (
+            "using_superpowers_entrypoint_ban_missing",
+            r"(?is)(?:using-superpowers.{0,80}(?:always\s+forbidden|never|must\s+not|do\s+not|"
+            r"始终禁止|不得|禁止)|(?:always\s+forbidden|never|must\s+not|do\s+not|始终禁止|不得|禁止).{0,80}using-superpowers)",
+            "Root rules must always forbid the using-superpowers entry point.",
+        ),
+    )
+    for code, pattern, message in contract_checks:
+        if not re.search(pattern, visible_root):
+            errors.append(issue(code, message, "AGENTS.md"))
+
+    for rel, text in documents:
+        for line_number, line in visible_rule_lines(text):
+            if not SUPERPOWER_REFERENCE_RE.search(line):
+                continue
+            negated = bool(SUPERPOWER_NEGATION_RE.search(line))
+            allowed_gate_line = bool(
+                (
+                    re.search(r"(?i)\bR3\b", line)
+                    and re.search(r"(?i)\b(?:repository\s+)?(?:modification|change)\b|修改|变更", line)
+                )
+                or re.search(
+                    r"(?i)(?:explicit(?:ly)?|明确|显式).{0,120}(?:engineering\s+(?:design|implementation|workflow)|"
+                    r"工程化(?:设计|实施|工作流)|harness)",
+                    line,
+                )
+            )
+            if re.search(
+                r"(?i)superpowers?.{0,50}(?:enabled|allowed|loaded|on)\s+by\s+default|"
+                r"(?:enable|allow|load)s?\s+superpowers?.{0,50}by\s+default|"
+                r"superpower.{0,50}默认(?:允许|启用|加载|开启)|默认(?:允许|启用|加载|开启).{0,50}superpower",
+                line,
+            ) and not negated:
+                errors.append(issue(
+                    "contradictory_superpower_policy",
+                    "Superpower cannot be enabled or allowed by default.",
+                    rel, line_number,
+                ))
+            if (
+                re.search(r"(?i)\bharness\b", line)
+                and re.search(r"(?i)\b(?:all|every)\b|全部|所有", line)
+                and SUPERPOWER_ACTIVATION_RE.search(line)
+                and not negated
+            ):
+                errors.append(issue(
+                    "automatic_superpower_chain",
+                    "Harness must not automatically load an entire Superpower skill chain.",
+                    rel, line_number,
+                ))
+            if (
+                SUPERPOWER_ACTIVATION_RE.search(line)
+                and (
+                    any(pattern.search(line) for pattern in UNAUTHORIZED_SUPERPOWER_TRIGGER_RES)
+                    or SPECIFIC_SUPERPOWER_SKILL_RE.search(line)
+                )
+                and not allowed_gate_line
+                and not negated
+            ):
+                errors.append(issue(
+                    "unauthorized_superpower_trigger",
+                    "Only an actual R3 repository modification or an explicit engineering/Harness workflow may authorize considering Superpower.",
+                    rel, line_number,
+                ))
 def scan_root_runtime_boundaries(
     text: str, errors: list[dict[str, object]], warnings: list[dict[str, object]]
 ) -> None:
@@ -1113,6 +1280,8 @@ def validate_repository(
     scan_unresolved_placeholders(documents, errors)
     scan_duplicate_and_conflicting_rules(documents, errors)
     scan_forbidden_workflows(documents, errors)
+    if root_path.is_file():
+        validate_superpower_default_deny(root_text, documents, errors)
 
     baseline = resolve_optional_path(root, baseline_inventory_path)
     if baseline is not None and baseline.is_file():

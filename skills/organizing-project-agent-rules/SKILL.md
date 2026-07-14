@@ -23,7 +23,7 @@ description: Use when a repository is missing a root AGENTS.md, has scattered, d
 使用本 Skill 目录中两个纯标准库、只读脚本：
 
 - `scripts/inventory_agent_rules.py`：列出指令文件、fallback、Markdown 引用图、大小、Git 状态、规则候选和证据源。
-- `scripts/validate_agent_rules.py`：检查根预算、必要章节、链接、空文件、强制路由深度、可选工作流误启用和账本覆盖。
+- `scripts/validate_agent_rules.py`：检查根预算、必要章节、链接、空文件、强制路由深度、Superpower default-deny、可选工作流误启用和账本覆盖。
 
 运行 `python3 <script> --help` 查看参数。把 `SKILL_DIR` 设为当前已加载 Skill 的绝对目录；不要假设仓库当前目录就是 Skill 目录。
 
@@ -95,7 +95,9 @@ python3 "$SKILL_DIR/scripts/inventory_agent_rules.py" --repo "$REPO" --json > "$
 - 维护者说明、案例、历史背景；
 - 应由 `.codex/rules/`、lint、测试或 CI 强制的机械约束。
 
-优先使用 `preserved-in-root`、`migrated`、`merged-equivalent`、`inferred-high-confidence`、`user-confirmed`、`unresolved-needs-user`、`omitted-not-a-rule`、`externalized-runtime-config`；兼容旧账本状态但新账本不得混用同义状态。相似措辞不自动等于重复；合并时仍为每个 Rule ID 保留覆盖记录。
+优先使用 `preserved-in-root`、`migrated`、`merged-equivalent`、`inferred-high-confidence`、`user-confirmed`、`unresolved-needs-user`、`omitted-not-a-rule`、`externalized-runtime-config`；被当前用户明确政策覆盖的旧 Superpower 宽松触发必须使用 `superseded-by-current-user-policy`。兼容旧账本状态但新账本不得混用同义状态。相似措辞不自动等于重复；合并时仍为每个 Rule ID 保留覆盖记录。
+
+对每条被覆盖的旧 Superpower 规则保留原文、原位置、冲突说明和新权威位置，不得静默删除。当前用户明确政策高于旧模板和旧 Skill 规则。
 
 ### 4. Infer missing project attributes and batch questions
 
@@ -162,7 +164,7 @@ docs/agent/
 - 只描述本领域，不重复根级授权、通用风险、通用验证或其他领域规则；
 - 不把历史说明变成运行时规则，不堆砌通用最佳实践。
 
-AgentHub、Harness 和专项技能属于默认关闭的可选入口。不要自动启用它们，不要让 Harness 自动启用 AgentHub，不要加载全部 Superpower，不要在项目规则中管理 Codex 计划模式。
+AgentHub、Harness 和专项技能属于默认关闭的可选入口。Superpower default-deny policy 的唯一授权门是实际 R3 仓库修改，或用户明确要求工程化设计、工程化实施/Harness 工作流；命中只解除禁令，不代表必须调用。禁止 `using-superpowers` 总入口，不得用 R0/R1/R2、复杂度、计划模式、多 Agent、TDD、调试或验证失败扩展授权门，也不要让 Harness 自动启用 AgentHub 或 Superpower 技能链。
 
 若旧规则混入用户或机器级 Codex 运行时配置，将原文迁入非运行时操作记录，账本状态标为 `externalized-runtime-config`；不得读取、备份或修改用户配置，也不得把固定上下文、价格或当前模型映射重新包装成项目规则。AgentHub 细节仅在明确启用时进入直接路由的工作流叶子。
 
@@ -187,7 +189,8 @@ python3 "$SKILL_DIR/scripts/validate_agent_rules.py" \
 - 基线规则候选全部进入账本且每条有效规则有权威去向；
 - 根引用都存在，无空规则、悬空链接或不必要的强制二级路由；
 - 根不超过 6 KiB，十类属性齐全；
-- 未引入项目计划模式规则，未自动启用 AgentHub、Harness 或全部 Superpower；
+- 根包含 Superpower 默认禁止、仅 R3 修改/用户显式工程化工作流两个授权门、“允许不等于必须”和 `using-superpowers` 总入口禁令；
+- 未引入项目计划模式规则，未自动启用 AgentHub、Harness 或 Superpower 技能链；
 - 用户已有修改和非规则文件保持原样；
 - 未运行的检查未被声称通过。
 - 相同输入再次运行时结构、Rule ID 和路由稳定；不重复创建、迁移、提问、排序或改写。validator 通过且无语义问题时 diff 必须为空。
@@ -236,7 +239,7 @@ python3 "$SKILL_DIR/scripts/validate_agent_rules.py" \
 
 - 根 `AGENTS.md` 的 UTF-8 字节数和行数；
 - 创建、修改、保留和移除的规则文件；
-- 各证据来源类型、置信度与处理状态数量，包括 `externalized-runtime-config`；
+- 各证据来源类型、置信度与处理状态数量，包括 `externalized-runtime-config` 和 `superseded-by-current-user-policy`；
 - 从仓库推断的内容及证据、用户明确提供的内容；
 - 冲突、未确认事项和推迟的危险步骤；
 - 实际运行的清单、验证、diff 和项目检查，以及未运行项。

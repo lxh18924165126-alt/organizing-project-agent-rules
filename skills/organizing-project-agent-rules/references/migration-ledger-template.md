@@ -18,6 +18,7 @@
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | R-0123456789ab | AGENTS.md | Backend rules, line 42 | explicit-rule | high | yes | no | no | API handlers delegate business decisions to services | backend | docs/agent/domains/backend.md | migrated | existing rule text | no | - |
 | R-abcdef012345 | .github/workflows/ci.yml | test job | machine-config | high | no | yes | no | Run the declared focused test command | verification | AGENTS.md | inferred-high-confidence | CI plus manifest | no | - |
+| R-fedcba987654 | AGENTS.md | Optional workflows, line 77 | explicit-rule | high | yes | no | no | Complex bugs automatically use systematic-debugging | 专项技能 | AGENTS.md#superpower | superseded-by-current-user-policy | original rule text and current user policy | yes | Old independent trigger conflicts with Superpower default-deny policy; new authority is root Superpower section |
 
 ## Coverage summary
 
@@ -30,6 +31,7 @@
 - Unresolved needs user: {{COUNT}}
 - Omitted not a rule: {{COUNT}}
 - Externalized runtime config: {{COUNT}}
+- Superseded by current user policy: {{COUNT}}
 - Uncovered: 0
 ```
 
@@ -43,7 +45,8 @@
 - `Semantic summary`：保留原约束强度、适用条件、禁止项和例外，不只摘关键词。
 - `Category`：至少支持根级基本约定、项目背景、风险与执行路由、技术栈和文档索引、文档与检查点、禁止事项、架构护栏、前端、后端、契约、数据库、安全、基础设施、R3/强化验证、AgentHub、Harness、专项技能、维护者说明/历史、机械约束、`operator-runtime-config`。
 - `Authority target`：给出仓库内实际存在的唯一生效文件及可选锚点。Markdown 叶子必须由根直接路由；嵌套 `AGENTS.md` 或机械执行文件必须处于其真实生效位置。不得指向 legacy、archive、Git 历史或本迁移报告。
-- `Status`：新账本只使用 `preserved-in-root`、`migrated`、`merged-equivalent`、`inferred-high-confidence`、`user-confirmed`、`unresolved-needs-user`、`omitted-not-a-rule`、`externalized-runtime-config`。验证器兼容旧状态仅用于读取历史账本。
+- `Status`：新账本只使用 `preserved-in-root`、`migrated`、`merged-equivalent`、`inferred-high-confidence`、`user-confirmed`、`unresolved-needs-user`、`omitted-not-a-rule`、`externalized-runtime-config`、`superseded-by-current-user-policy`。验证器兼容旧状态仅用于读取历史账本。
+- `superseded-by-current-user-policy` 用于被当前用户明确政策覆盖的旧规则；必须保留原文与位置，`Existing explicit rule = yes`、`Semantics changed = yes`，把唯一新权威位置写入 `Authority target`，并在 `Conflict / notes` 说明冲突。
 - `externalized-runtime-config` 仅配合 `operator-runtime-config` 使用；此时 `Authority target` 指向非运行时迁移/操作者记录，保留原文、来源与“不自动应用”说明，不得由根路由。
 - `Evidence`：引用清单、配置、测试、代码边界、README、ADR、CI 或用户明确输入；不要写无来源猜测。
 - `Semantics changed`：通常为 `no`。只有用户明确改变规则或有已解决冲突时才写 `yes`；无法确认时写 `unknown` 且状态为 `unresolved-needs-user`。

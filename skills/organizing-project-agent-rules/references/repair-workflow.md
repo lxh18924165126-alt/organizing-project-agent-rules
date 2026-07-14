@@ -5,4 +5,5 @@
 1. 先运行盘点和验证器，按错误代码修复，不做全量重写。
 2. 保留用户未提交规则修改；冲突按统一证据优先级解决，无法可靠解决时标为 `unresolved-needs-user` 并集中询问。
 3. 删除空/无证据领域叶子，补齐真实缺失目标，合并等价规则并为每个 Rule ID 保持账本映射。
-4. validator 通过且没有语义问题时停止；再次运行优先 no-op，不重排或润色有效规则。
+4. 修复缺失或冲突的 Superpower default-deny 根规则；旧独立触发使用 `superseded-by-current-user-policy` 留证，不静默删除。
+5. validator 通过且没有语义问题时停止；再次运行优先 no-op，不重排或润色有效规则。
