@@ -43,7 +43,7 @@
 - `Confidence`：`high`、`medium`、`low`。单一代码模式只能为 low，不能直接生成硬规则。
 - 三个布尔字段只写 `yes`/`no`，分别区分现有明确规则、仓库事实推断和用户确认。
 - `Semantic summary`：保留原约束强度、适用条件、禁止项和例外，不只摘关键词。
-- `Category`：至少支持根级基本约定、项目背景、风险与执行路由、技术栈和文档索引、文档与检查点、禁止事项、架构护栏、前端、后端、契约、数据库、安全、基础设施、R3/强化验证、AgentHub、Harness、专项技能、维护者说明/历史、机械约束、`operator-runtime-config`。
+- `Category`：至少支持根级基本约定、项目背景、风险与执行路由、技术栈和文档索引、文档与检查点、禁止事项、架构护栏、前端、后端、契约、数据库、安全、基础设施、R3/强化验证、子代理委派、AgentHub、Harness、专项技能、维护者说明/历史、机械约束、`operator-runtime-config`。
 - `Authority target`：给出仓库内实际存在的唯一生效文件及可选锚点。Markdown 叶子必须由根直接路由；嵌套 `AGENTS.md` 或机械执行文件必须处于其真实生效位置。不得指向 legacy、archive、Git 历史或本迁移报告。
 - `Status`：新账本只使用 `preserved-in-root`、`migrated`、`merged-equivalent`、`inferred-high-confidence`、`user-confirmed`、`unresolved-needs-user`、`omitted-not-a-rule`、`externalized-runtime-config`、`superseded-by-current-user-policy`。验证器兼容旧状态仅用于读取历史账本。
 - `superseded-by-current-user-policy` 用于被当前用户明确政策覆盖的旧规则；必须保留原文与位置，`Existing explicit rule = yes`、`Semantics changed = yes`，把唯一新权威位置写入 `Authority target`，并在 `Conflict / notes` 说明冲突。
@@ -56,7 +56,7 @@
 
 - 不得以“已复制到迁移报告”“仍在 Git 历史中”或“看起来重复”代替权威位置映射。
 - 合并等价项时，为每个旧 Rule ID 各保留一行，并让它们指向同一权威规则。
-- 现有明确规则不得标为 `omitted-not-a-rule`；必须保留、迁移、等价合并、外置运行时配置或明确未决。
+- 现有明确规则不得标为 `omitted-not-a-rule`；必须保留、迁移、等价合并、外置运行时配置、明确未决，或按当前用户明确政策以 `superseded-by-current-user-policy` 覆盖并留证。
 - `inferred-high-confidence` 必须同时满足“仓库推断 = yes”和“置信度 = high”；`user-confirmed` 必须有用户确认。
 - 删除嵌套 `AGENTS.md` 前，账本必须覆盖其中每条有效规则并记录去重证据。
 - 账本仍有未覆盖候选、空字段、非法状态或无权威目标时，不得宣称迁移完成。

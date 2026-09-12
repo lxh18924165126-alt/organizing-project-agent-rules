@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -69,6 +70,11 @@ def root_document(
 ## Optional workflows and rule precedence
 - Optional workflows require an explicit user request.
 - Platform constraints outrank current user scope, root rules, routed rules, and convention.
+
+## Subagents
+- Proactively delegate when two or more independent parallel branches need substantive research or analysis. Skip simple tasks, strong sequential dependencies, or low parallel benefit; explain why in the first progress update.
+- All subagents use `gpt-5.6-luna / max`; only an explicit user choice in the current task may override either. Choose count by task needs and concurrency limit, not a fixed three; avoid duplicate work and parallel edits to the same file.
+- Wait for all subagents to finish, check evidence and conflicts, then produce a unified response. Subagents inherit the current task scope and authorization boundaries.
 
 ## Superpower
 - Superpower is denied by default. Only an actual R3 repository modification or an explicit user request for an engineering design, engineering implementation, or Harness workflow may allow considering the narrowest specific skill.
@@ -759,7 +765,7 @@ class ValidateAgentRulesTests(unittest.TestCase):
                 {item["code"] for item in report["errors"]},
             )
 
-    def test_agenthub_leaf_requires_tiers_fallback_permissions_and_write_ownership(self) -> None:
+    def test_agenthub_leaf_requires_fixed_subagent_profile_permissions_and_ownership(self) -> None:
         module = load_module()
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -786,16 +792,14 @@ class ValidateAgentRulesTests(unittest.TestCase):
             )
             report = module.validate_repository(root, ledger_path, baseline_path)
             codes = {item["code"] for item in report["errors"]}
-            self.assertIn("agenthub_fixed_mapping_without_policy", codes)
+            self.assertIn("subagent_model_policy_missing", codes)
             self.assertIn("agenthub_write_governance_missing", codes)
             self.assertIn("agenthub_permission_governance_missing", codes)
 
             workflow.write_text(
                 "# AgentHub\n\n## Applies to\nExplicit multi-agent work.\n\n"
                 "## Does not apply to\nNormal R3 work.\n\n## Authoritative rules\n"
-                "- Deep/critical capability tier: Sol high/xhigh; max only for the hardest work.\n"
-                "- Balanced implementation tier: Terra medium/high.\n"
-                "- Fast deterministic tier: Luna low/medium. These names are current mappings; fall back to the nearest available capability without ROUTING_HOLD.\n"
+                "- All subagents use gpt-5.6-luna / max; only an explicit user choice in the current task may override either.\n"
                 "- Shared workspace uses one writer; parallel writers require isolated worktrees, non-overlapping writable roots, explicit ownership, and one Integrator as the sole final integrator.\n"
                 "- Explorer, Reviewer, Advisor, and read verification roles are read-only; Worker gets workspace-write only within ownership. danger-full-access requires separate explicit per-task user authorization and only when the platform allows it.\n",
                 encoding="utf-8",
@@ -813,9 +817,104 @@ class ValidateAgentRulesTests(unittest.TestCase):
             )
             report = module.validate_repository(root, ledger_path, baseline_path)
             codes = {item["code"] for item in report["errors"]}
-            self.assertIn("agenthub_capability_tiers_incomplete", codes)
+            self.assertIn("subagent_model_policy_missing", codes)
             self.assertIn("agenthub_write_governance_missing", codes)
             self.assertIn("agenthub_permission_governance_missing", codes)
+
+    def test_subagent_root_contract_requires_trigger_profile_and_final_integration(self) -> None:
+        module = load_module()
+        cases = (
+            ("Proactively delegate when two or more independent parallel branches need substantive research or analysis.", "Delegate only when explicitly requested.", "subagent_delegation_policy_missing"),
+            ("gpt-5.6-luna / max", "gpt-5.6-luna / low", "subagent_model_policy_missing"),
+            ("only an explicit user choice in the current task may override either", "choose the best model for each task", "subagent_override_policy_missing"),
+            ("Wait for all subagents to finish, check evidence and conflicts, then produce a unified response.", "Summarize available outputs.", "subagent_integration_policy_missing"),
+            ("Subagents inherit the current task scope and authorization boundaries.", "Subagents work independently.", "subagent_scope_policy_missing"),
+        )
+        for before, after, expected in cases:
+            with self.subTest(expected=expected), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                ledger_path, baseline_path = self.make_valid_repo(root)
+                (root / "AGENTS.md").write_text(root_document().replace(before, after), encoding="utf-8")
+                report = module.validate_repository(root, ledger_path, baseline_path)
+                self.assertIn(expected, {item["code"] for item in report["errors"]})
+
+    def test_subagent_policy_rejects_silent_model_fallback_in_active_leaf(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ledger_path, baseline_path = self.make_valid_repo(root)
+            leaf = root / "docs/agent/domains/backend.md"
+            original = leaf.read_text(encoding="utf-8")
+            leaf.write_text(original + "\n- Subagents automatically fall back to the nearest available model.\n", encoding="utf-8")
+            report = module.validate_repository(root, ledger_path, baseline_path)
+            self.assertIn("subagent_model_auto_fallback", {item["code"] for item in report["errors"]})
+            leaf.write_text(original + "\n- Subagents must not automatically fall back to a different model.\n", encoding="utf-8")
+            report = module.validate_repository(root, ledger_path, baseline_path)
+            self.assertTrue(report["valid"], report["errors"])
+
+    def test_current_root_template_validates_with_real_fixture_values(self) -> None:
+        module = load_module()
+        template = (SKILL_DIR / "references/root-agents-template.md").read_text(encoding="utf-8")
+        root_template = template.split("```markdown\n", 1)[1].split("```", 1)[0]
+        self.assertLessEqual(len(root_template.encode("utf-8")), 4096)
+        self.assertLessEqual(len(root_template.splitlines()), 80)
+        substitutions = {
+            "PROJECT_NAME": "Fixture API",
+            "LANGUAGE_OR_COMMUNICATION_RULE": "Reply in Chinese.",
+            "ONE_OR_TWO_SENTENCES_ABOUT_PRODUCT_AND_REPOSITORY": "A local inventory API.",
+            "PRIMARY_COMPONENTS_AND_OWNERSHIP_BOUNDARIES": "API handlers delegate to services.",
+            "RUNTIME_AND_FRAMEWORK_FROM_EXECUTABLE_MANIFESTS": "Python 3.12.",
+            "MANIFEST_OR_CONFIG_PATHS": "pyproject.toml",
+            "README_ADR_API_OR_OPERATOR_INDEX_LINKS": "README.md",
+            "ROUTE_CONDITION": "API changes",
+            "RULE_NAME": "Backend",
+            "DIRECT_LEAF_PATH": "docs/agent/domains/backend.md",
+            "PROJECT_SPECIFIC_PROHIBITIONS": "Never log secrets.",
+            "PROJECT_SPECIFIC_INVARIANT": "API is the only database writer.",
+            "SECURITY_OR_DATA_INVARIANT": "Require API authentication.",
+            "DEPENDENCY_DIRECTION_INVARIANT": "Services must not import HTTP handlers.",
+        }
+        rendered = re.sub(r"\{\{([A-Z_]+)\}\}", lambda match: substitutions[match.group(1)], root_template)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ledger_path, baseline_path = self.make_valid_repo(root)
+            (root / "AGENTS.md").write_text(rendered, encoding="utf-8")
+            report = module.validate_repository(root, ledger_path, baseline_path)
+            self.assertTrue(report["valid"], report["errors"])
+
+    def test_subagent_profile_tokens_are_exact(self) -> None:
+        module = load_module()
+        for profile in ("gpt-5.6-luna-extra / max", "gpt-5.6-luna / max-plus"):
+            with self.subTest(profile=profile):
+                errors = []
+                module.validate_subagent_model_policy("rules.md", profile, errors)
+                self.assertIn("subagent_model_policy_missing", {item["code"] for item in errors})
+
+    def test_subagent_contradictions_in_roles_counts_and_fallbacks(self) -> None:
+        module = load_module()
+        cases = (
+            ("Reviewers use Terra / medium by default.", "subagent_conflicting_profile"),
+            ("Workers use gpt-5.6-luna / low.", "subagent_conflicting_profile"),
+            ("Always use exactly 3 subagents for every task.", "subagent_fixed_count"),
+            ("始终固定创建 2 个子代理。", "subagent_fixed_count"),
+            ("Worker automatically falls back to Terra medium when Luna is unavailable.", "subagent_model_auto_fallback"),
+            ("AgentHub automatically switches to a nearest available model.", "subagent_model_auto_fallback"),
+        )
+        for rule, expected in cases:
+            with self.subTest(rule=rule):
+                errors = []
+                module.validate_subagent_rules(root_document(), [("workflows/agenthub.md", rule)], errors)
+                self.assertIn(expected, {item["code"] for item in errors})
+        for rule in (
+            "Never use exactly 3 subagents for every task.",
+            "子代理不得自动回退到其他模型，也不要固定创建 3 个子代理。",
+            "For the current task, the user explicitly requested Reviewers use Terra / medium.",
+            "仅当用户在当前任务中明确指定时，Reviewers 可使用 Terra / medium。",
+        ):
+            with self.subTest(allowed_rule=rule):
+                errors = []
+                module.validate_subagent_rules(root_document(), [("workflows/agenthub.md", rule)], errors)
+                self.assertEqual([], errors)
 
     def test_risk_classification_does_not_grant_danger_full_access(self) -> None:
         module = load_module()

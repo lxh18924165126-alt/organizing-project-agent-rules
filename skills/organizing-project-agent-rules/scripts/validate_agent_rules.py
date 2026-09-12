@@ -934,27 +934,114 @@ def scan_root_runtime_boundaries(
         ))
 
 
+def validate_subagent_model_policy(
+    rel: str, text: str, errors: list[dict[str, object]]
+) -> None:
+    if not re.search(
+        r"(?<![\w.-])gpt-5\.6-luna(?![\w.-])[^\n]{0,40}(?<![\w.-])max(?![\w.-])",
+        text, re.IGNORECASE,
+    ):
+        errors.append(issue(
+            "subagent_model_policy_missing",
+            "Subagents must default to gpt-5.6-luna with max reasoning effort.", rel,
+        ))
+    if not all(re.search(pattern, text, re.IGNORECASE) for pattern in (
+        r"only|unless|仅|除非", r"explicit|明确", r"user|用户",
+        r"current task|当前任务", r"override|change|指定可改|覆盖|改用|更改",
+    )):
+        errors.append(issue(
+            "subagent_override_policy_missing",
+            "Only an explicit user choice in the current task may override the subagent model or effort.", rel,
+        ))
+
+
+def validate_subagent_rules(
+    root_text: str, documents: list[tuple[str, str]], errors: list[dict[str, object]]
+) -> None:
+    # Check the authored policy, not whether a real task warrants delegation.
+    sections = matching_sections(document_sections(root_text), ("subagents", "子代理", "原生子代理"))
+    policy = "\n".join(
+        line for section in sections for _, line in visible_rule_lines("\n".join(section["body"]))
+    )
+    validate_subagent_model_policy("AGENTS.md", policy, errors)
+    checks = (
+        ("subagent_delegation_policy_missing", (
+            r"two or more|at least (?:two|2)|两个或更多|至少两个|至少\s*2",
+            r"independent|独立", r"parallel|并行", r"substantive|实质",
+            r"research|analysis|检索|分析", r"proactiv|主动",
+            r"simple|简单", r"sequential|顺序依赖", r"low.*benefit|低.*收益|收益.*低",
+            r"first progress|首条进度", r"explain|说明原因",
+        ), "Root rules must define substantive independent-branch delegation and explain exceptions in the first progress update."),
+        ("subagent_count_policy_missing", (
+            r"task needs|按需|任务需要", r"concurrency limit|并发上限",
+            r"not (?:a )?fixed (?:three|3)|不固定为?\s*3",
+            r"avoid duplicate|避免重复", r"same file|同文件|同一文件",
+        ), "Choose subagent count by task and concurrency limits; avoid duplicate work and same-file parallel edits."),
+        ("subagent_integration_policy_missing", (
+            r"wait for all.*(?:finish|complete)|等待全部子代理完成",
+            r"check evidence and conflicts|核对证据和冲突",
+            r"unified response|统一输出",
+        ), "Wait for all subagents, reconcile evidence and conflicts, then deliver the unified result."),
+        ("subagent_scope_policy_missing", (
+            r"inherit|继承", r"current task scope|当前任务范围|当前任务的范围",
+            r"authorization boundaries|授权边界",
+        ), "Subagents must inherit current task scope and authorization boundaries."),
+    )
+    for code, patterns, message in checks:
+        if not all(re.search(pattern, policy, re.IGNORECASE) for pattern in patterns):
+            errors.append(issue(code, message, "AGENTS.md"))
+    for rel, text in documents:
+        for line_number, line in visible_rule_lines(text):
+            if not re.search(
+                r"\b(?:subagents?|agenthub|workers?|reviewers?|explorers?|advisors?)\b|子代理|子\s*Agent|gpt-5\.6-luna",
+                line, re.IGNORECASE,
+            ):
+                continue
+            for clause in re.split(r"[;；。]|(?<!\d)\.\s+", line):
+                if re.search(r"\bnot\b|\bnever\b|不(?:得|允许|自动|能|固定)|禁止|不要", clause, re.IGNORECASE):
+                    continue
+                explicit_override = all(re.search(p, clause, re.IGNORECASE) for p in (
+                    r"current task|当前任务", r"user|用户", r"explicit|明确",
+                    r"requested|requests|指定|要求",
+                ))
+                if re.search(
+                    r"(?:always|exactly|fixed).{0,30}\b(?:\d+|two|three|four)\b.{0,12}subagents?|"
+                    r"(?:始终|固定|总是).{0,12}(?:\d+|[二三四五]).{0,6}子代理",
+                    clause, re.IGNORECASE,
+                ):
+                    errors.append(issue(
+                        "subagent_fixed_count", "Subagent count must follow task needs and concurrency limits, not a fixed count.",
+                        rel, line_number,
+                    ))
+                if explicit_override:
+                    continue
+                if re.search(
+                    r"fall(?:s|ing)?\s*back|fallback|回退|自动切换|automatically\s+switch(?:es)?",
+                    clause, re.IGNORECASE,
+                ):
+                    errors.append(issue(
+                        "subagent_model_auto_fallback",
+                        "Do not automatically replace the requested subagent model or reasoning effort.",
+                        rel, line_number,
+                    ))
+                models = re.findall(r"\bgpt-[a-z0-9]+(?:[._-][a-z0-9]+)*\b|\b(?:Sol|Terra|Luna)\b", clause, re.IGNORECASE)
+                efforts = re.findall(r"(?:/|effort|推理强度)\s*[:=]?\s*(low|medium|high|xhigh|max|ultra)\b", clause, re.IGNORECASE)
+                if re.search(r"\buse(?:s)?\b|\bassign|\bdefault\b|使用|用|默认|分配", clause, re.IGNORECASE) and (
+                    any(model.casefold() != "gpt-5.6-luna" for model in models)
+                    or any(effort.casefold() != "max" for effort in efforts)
+                ):
+                    errors.append(issue(
+                        "subagent_conflicting_profile", "A role cannot override the subagent model or effort without a current-task explicit user choice.",
+                        rel, line_number,
+                    ))
+
+
 def validate_agenthub_leaf(
     rel: str, text: str, errors: list[dict[str, object]]
 ) -> None:
     if "agenthub" not in rel.casefold() and "agenthub" not in text.casefold():
         return
-    has_models = bool(re.search(r"\b(?:Sol|Terra|Luna)\b", text, re.IGNORECASE))
-    has_deep = bool(re.search(r"deep/critical|深度/关键|深度.*关键", text, re.IGNORECASE))
-    has_balanced = bool(re.search(r"balanced implementation|均衡实现", text, re.IGNORECASE))
-    has_fast = bool(re.search(r"fast deterministic|快速确定", text, re.IGNORECASE))
-    has_tiers = has_deep and has_balanced and has_fast
-    has_fallback = bool(re.search(r"fall\s*back|fallback|nearest available capability|最近可用能力|最接近.*能力", text, re.IGNORECASE))
-    if has_models and not (has_tiers and has_fallback):
-        errors.append(issue(
-            "agenthub_fixed_mapping_without_policy",
-            "Model names require semantic capability tiers and a nearest-capability fallback principle.", rel,
-        ))
-    if not has_tiers:
-        errors.append(issue(
-            "agenthub_capability_tiers_incomplete",
-            "AgentHub rules require deep/critical, balanced implementation, and fast deterministic capability tiers.", rel,
-        ))
+    validate_subagent_model_policy(rel, text, errors)
     has_single_writer = bool(re.search(r"one writer|single writer|单写者", text, re.IGNORECASE))
     has_isolation = bool(re.search(r"isolated worktrees?|隔离.*worktree|non-overlapping writable roots|不重叠.*写", text, re.IGNORECASE))
     has_integrator = bool(re.search(r"sole final integrator|唯一.*Integrator|Integrator.*唯一", text, re.IGNORECASE))
@@ -1281,6 +1368,7 @@ def validate_repository(
     scan_duplicate_and_conflicting_rules(documents, errors)
     scan_forbidden_workflows(documents, errors)
     if root_path.is_file():
+        validate_subagent_rules(root_text, documents, errors)
         validate_superpower_default_deny(root_text, documents, errors)
 
     baseline = resolve_optional_path(root, baseline_inventory_path)

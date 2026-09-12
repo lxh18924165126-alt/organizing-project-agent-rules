@@ -14,7 +14,7 @@ class SkillPolicyContractTests(unittest.TestCase):
         for marker in (
             "operator-runtime-config", "externalized-runtime-config",
             "model_context_window", "model_auto_compact_token_limit",
-            "能力层级", "最近可用能力", "danger-full-access",
+            "gpt-5.6-luna", "max", "danger-full-access",
             "单写者", "Integrator", "删除",
         ):
             self.assertIn(marker, policy)
@@ -25,7 +25,7 @@ class SkillPolicyContractTests(unittest.TestCase):
         ledger = self.read("references/migration-ledger-template.md")
         scenarios = self.read("references/eval-scenarios.md")
         self.assertIn("用户运行时配置", root)
-        self.assertIn("能力层级", routed)
+        self.assertIn("gpt-5.6-luna / max", routed)
         self.assertIn("并行写入", routed)
         self.assertIn("externalized-runtime-config", ledger)
         for number in range(10, 20):

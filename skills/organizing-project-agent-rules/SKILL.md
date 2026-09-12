@@ -18,7 +18,7 @@ description: Use when a repository is missing a root AGENTS.md, has scattered, d
 3. 创建或重写叶子规则前读取 [routed-rule-template.md](references/routed-rule-template.md)。
 4. 建立账本前读取 [migration-ledger-template.md](references/migration-ledger-template.md)。
 5. 模式确定后只读取对应内部流程：[bootstrap](references/bootstrap-workflow.md)、[migrate](references/migration-workflow.md)、[repair](references/repair-workflow.md) 或 [audit](references/audit-workflow.md)。四种模式共享前述政策与模板。
-6. 仅在评测或维护本 Skill 时读取 [eval-scenarios.md](references/eval-scenarios.md)；正常仓库治理无需加载。
+6. 仅在评测或维护本 Skill 时读取 [eval-scenarios.md](references/eval-scenarios.md)；核对被覆盖的历史政策时读取 [policy-migration-ledger.md](references/policy-migration-ledger.md)，其内容不作为生效规则。
 
 使用本 Skill 目录中两个纯标准库、只读脚本：
 
@@ -44,6 +44,8 @@ description: Use when a repository is missing a root AGENTS.md, has scattered, d
 ## Workflow
 
 严格按顺序执行。不得从“压缩根文件”直接开始。
+
+遵守 `policy-spec.md` 第 7 节子代理规则：存在两个或更多可独立并行且需实质检索/分析的分支时主动委派；简单、强顺序依赖或低收益任务不委派，并在首条进度说明原因。全部子代理使用 `gpt-5.6-luna / max`，仅当前任务用户明确指定可覆盖；数量按需要和并发上限，不固定为 3。避免重复工作与同文件并行写；等待全部子代理完成、核对证据和冲突后统一输出，并传递当前范围与授权边界。
 
 ### 1. Determine scope, inventory, and select mode
 
@@ -90,14 +92,14 @@ python3 "$SKILL_DIR/scripts/inventory_agent_rules.py" --repo "$REPO" --json > "$
 
 - 根级约定、项目背景、风险/执行路由、技术栈/文档索引、文档/检查点、禁止事项、架构护栏；
 - 前端、后端、契约、数据库、安全、基础设施等领域；
-- R3/强化验证、AgentHub、Harness、专项技能等可选工作流；
+- 子代理委派，以及 R3/强化验证、AgentHub、Harness、专项技能等工作流；
 - 操作者运行时配置：上下文窗口、自动压缩阈值、账户/价格阈值和用户级 Codex 配置只登记为 `operator-runtime-config`，不得写入生效项目规则；
 - 维护者说明、案例、历史背景；
 - 应由 `.codex/rules/`、lint、测试或 CI 强制的机械约束。
 
 优先使用 `preserved-in-root`、`migrated`、`merged-equivalent`、`inferred-high-confidence`、`user-confirmed`、`unresolved-needs-user`、`omitted-not-a-rule`、`externalized-runtime-config`；被当前用户明确政策覆盖的旧 Superpower 宽松触发必须使用 `superseded-by-current-user-policy`。兼容旧账本状态但新账本不得混用同义状态。相似措辞不自动等于重复；合并时仍为每个 Rule ID 保留覆盖记录。
 
-对每条被覆盖的旧 Superpower 规则保留原文、原位置、冲突说明和新权威位置，不得静默删除。当前用户明确政策高于旧模板和旧 Skill 规则。
+对每条被覆盖的旧 Superpower 或多 Agent 规则保留原文、原位置、冲突说明和新权威位置，以 `superseded-by-current-user-policy` 留证，不得静默删除。当前用户明确政策高于旧模板和旧 Skill 规则。
 
 ### 4. Infer missing project attributes and batch questions
 
@@ -164,7 +166,7 @@ docs/agent/
 - 只描述本领域，不重复根级授权、通用风险、通用验证或其他领域规则；
 - 不把历史说明变成运行时规则，不堆砌通用最佳实践。
 
-AgentHub、Harness 和专项技能属于默认关闭的可选入口。Superpower default-deny policy 的唯一授权门是实际 R3 仓库修改，或用户明确要求工程化设计、工程化实施/Harness 工作流；命中只解除禁令，不代表必须调用。禁止 `using-superpowers` 总入口，不得用 R0/R1/R2、复杂度、计划模式、多 Agent、TDD、调试或验证失败扩展授权门，也不要让 Harness 自动启用 AgentHub 或 Superpower 技能链。
+AgentHub 完整工作流、Harness 和专项技能属于默认关闭的可选入口；原生子代理主动委派按第 7 节政策执行。Superpower default-deny policy 的唯一授权门是实际 R3 仓库修改，或用户明确要求工程化设计、工程化实施/Harness 工作流；命中只解除禁令，不代表必须调用。禁止 `using-superpowers` 总入口，不得用 R0/R1/R2、复杂度、计划模式、多 Agent、TDD、调试或验证失败扩展授权门，也不要让 Harness 自动启用 AgentHub 或 Superpower 技能链。
 
 若旧规则混入用户或机器级 Codex 运行时配置，将原文迁入非运行时操作记录，账本状态标为 `externalized-runtime-config`；不得读取、备份或修改用户配置，也不得把固定上下文、价格或当前模型映射重新包装成项目规则。AgentHub 细节仅在明确启用时进入直接路由的工作流叶子。
 
@@ -190,7 +192,8 @@ python3 "$SKILL_DIR/scripts/validate_agent_rules.py" \
 - 根引用都存在，无空规则、悬空链接或不必要的强制二级路由；
 - 根不超过 6 KiB，十类属性齐全；
 - 根包含 Superpower 默认禁止、仅 R3 修改/用户显式工程化工作流两个授权门、“允许不等于必须”和 `using-superpowers` 总入口禁令；
-- 未引入项目计划模式规则，未自动启用 AgentHub、Harness 或 Superpower 技能链；
+- 子代理触发、模型与强度、数量、等待汇总和范围继承符合当前政策；未把原生委派绑定到 AgentHub 完整工作流；
+- 未引入项目计划模式规则，未自动启用 AgentHub 完整工作流、Harness 或 Superpower 技能链；
 - 用户已有修改和非规则文件保持原样；
 - 未运行的检查未被声称通过。
 - 相同输入再次运行时结构、Rule ID 和路由稳定；不重复创建、迁移、提问、排序或改写。validator 通过且无语义问题时 diff 必须为空。
